@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <!--
+        force="true" because docker-compose's `env_file: .env` sets these as
+        real OS environment variables, which non-forced <env> entries here
+        cannot override (PHPUnit only fills in variables not already set).
+        Without force, APP_ENV never becomes "testing" and Laravel never
+        picks up .env.testing below.
+
+        Unlike the stock Laravel skeleton, this project deliberately does NOT
+        swap in sqlite/array/sync fakes for tests: the suite exercises real
+        Redis atomicity, real Postgres constraints, and real RabbitMQ
+        behavior (see PLAN.md's test list — atomic claim, Redis flush
+        fallback, circuit breaker state, outbox recovery). .env.testing
+        points at the same docker-compose services as .env, just on a
+        separate Redis DB index so tests never share keyspace with dev/demo
+        data.
+        -->
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="NIGHTWATCH_ENABLED" value="false"/>
+    </php>
+</phpunit>

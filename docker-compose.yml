@@ -1,0 +1,158 @@
+name: price-alerts
+
+# Six services, three roles for the app image:
+#   nginx + php        synchronous HTTP (alert CRUD, auth)
+#   supervisor         the async half — RabbitMQ consumers + scheduler
+#   postgres/redis/rabbitmq   state, index, transport
+#
+# php and supervisor build from the SAME image (docker/php) and share the
+# bind mount. docker-entrypoint.sh serialises their first boot with flock so
+# only one runs composer install / migrate / declare-topology.
+
+services:
+  nginx:
+    build:
+      context: ./docker/nginx
+    container_name: price-alerts-nginx
+    restart: always
+    working_dir: /var/www/html
+    depends_on:
+      - php
+    ports:
+      - "${NGINX_PORT}:80"
+    volumes:
+      - .:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/data/logs/:/var/log/nginx/
+    networks:
+      - web
+
+  php:
+    build:
+      context: ./docker/php
+      args:
+        USER: ${USR}
+        GROUP: ${GRP}
+        UID: ${UID}
+        GID: ${GID}
+    container_name: price-alerts-php
+    restart: always
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+      - ./docker/php/www.conf:/usr/local/etc/php-fpm.d/www.conf
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - web
+
+  # Runs match-consumer, drain-consumer, mail-consumer and the scheduler.
+  # See docker/php/supervisord.conf for what each one does and why.
+  supervisor:
+    build:
+      context: ./docker/php
+    container_name: price-alerts-supervisor
+    restart: always
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html:delegated
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    entrypoint: ["docker-entrypoint.sh"]
+    command: ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+    networks:
+      - web
+
+  postgres:
+    image: postgres:17
+    container_name: price-alerts-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_HOST_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - web
+
+  # db 0 holds the alert index (ZSETs), db 1 the cache incl. the last price.
+  redis:
+    image: redis:7
+    container_name: price-alerts-redis
+    restart: always
+    command: --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_HOST_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      options:
+        max-size: "1m"
+        max-file: "10"
+    networks:
+      - web
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: price-alerts-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "${RABBITMQ_HOST_PORT}:5672"
+      - "${RABBITMQ_MANAGEMENT_HOST_PORT}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - web
+
+  # Local SMTP sink. Nothing leaves the machine; open the web UI to read mail.
+  mailpit:
+    image: axllent/mailpit
+    container_name: price-alerts-mailpit
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_WEB_PORT}:8025"
+      - "${MAILPIT_SMTP_PORT}:1025"
+    networks:
+      - web
+
+networks:
+  web:
+    name: price-alerts_network
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
